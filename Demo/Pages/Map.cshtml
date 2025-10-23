@@ -4,7 +4,21 @@
     ViewData["Title"] = "Revolutions Map";
 }
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<div id="map" style="height: 700px;"></div>
+<div class="d-flex" style="height:700px;">
+  <div id="map" style="flex:1;"></div>
+</div>
+
+<!-- Offcanvas side pane -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="revsPane" aria-labelledby="revsPaneLabel">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title" id="revsPaneLabel">Revolutions</h5>
+    <button type="button" class="btn-close text-reset" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body" id="revsPaneBody" style="padding:0 1rem 1rem 1rem; overflow:auto;">
+    <!-- Content populated by JS -->
+    <div class="p-3 text-muted">Click a country to load revolutions since 1950.</div>
+  </div>
+</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -40,41 +54,84 @@
                 const d = new Date(isoString);
                 if (!isNaN(d)) return d.toLocaleDateString();
             } catch {}
-            // fallback: try to extract year
             const m = isoString.match(/^(\d{4})/);
             return m ? m[1] : isoString;
         }
 
-        function buildPopupContent(countryName, iso, items) {
-            let html = `<div style="max-width:420px">`;
+        function buildPaneContent(countryName, iso, items) {
+            let html = `<div style="max-width:100%;">`;
             html += `<h4 style="margin:.25em 0;">${countryName}${iso ? ' (' + iso + ')' : ''}</h4>`;
             if (!items || items.length === 0) {
-                html += '<div>No recorded revolutions since 1950.</div></div>';
+                html += '<div class="text-muted">No recorded revolutions since 1950.</div></div>';
                 return html;
             }
 
-            html += `<div style="max-height:300px; overflow:auto; padding-right:6px;">`;
-            // sort by start date descending
+            html += `<div style="max-height:60vh; overflow:auto; padding-right:6px;">`;
             items.sort((a,b) => {
                 const da = a.startDate ? new Date(a.startDate).getTime() : 0;
                 const db = b.startDate ? new Date(b.startDate).getTime() : 0;
                 return db - da;
             });
 
-            html += '<ul style="margin:0; padding-left:18px;">';
+            html += '<ul class="list-unstyled" style="margin:0;">';
             for (const it of items) {
                 const start = it.startDate ? formatDateIso(it.startDate) : 'unknown';
                 const end = it.endDate ? formatDateIso(it.endDate) : '';
                 const period = end ? `${start} — ${end}` : `${start}`;
                 const wdLink = it.wikidataId ? ` <a href="https://www.wikidata.org/wiki/${it.wikidataId}" target="_blank" rel="noopener">Wikidata</a>` : '';
-                // optional short description if present
-                const desc = it.description ? ` <div style="color:#444; font-size:0.9em; margin-top:0.25em;">${(it.description.length > 140) ? it.description.slice(0,140) + '…' : it.description}</div>` : '';
-                html += `<li style="margin-bottom:0.5em;"><strong>${it.name}</strong><br/><span style="font-size:0.9em;color:#333">${period}</span>${wdLink}${desc}</li>`;
+                const desc = it.description ? `<div class="text-muted small" style="margin-top:.25rem;">${(it.description.length > 200) ? it.description.slice(0,200) + '…' : it.description}</div>` : '';
+                html += `<li style="margin-bottom:0.75rem;border-bottom:1px solid #eee;padding-bottom:.5rem;">
+                           <div><strong>${it.name}</strong>${wdLink}</div>
+                           <div class="small text-secondary">${period}</div>
+                           ${desc}
+                         </li>`;
             }
             html += '</ul></div></div>';
             return html;
         }
 
+        // small iso3->iso2 map for common codes; extend if needed
+        const iso3ToIso2 = {
+            "USA":"US","GBR":"GB","RUS":"RU","CHN":"CN","FRA":"FR","DEU":"DE","ESP":"ES","ITA":"IT",
+            "CAN":"CA","AUS":"AU","BRA":"BR","MEX":"MX","JPN":"JP","KOR":"KR","IND":"IN","IRN":"IR",
+            "SYR":"SY"
+        };
+
+        async function fetchRevolutionsForIsoOrName(iso, name) {
+            // 1) try iso as-is
+            if (iso) {
+                let url = '/api/revolutions?countryIso=' + encodeURIComponent(iso);
+                let r = await fetch(url);
+                if (r.ok) {
+                    let list = await r.json();
+                    if (Array.isArray(list) && list.length > 0) return list;
+                }
+                // 2) map iso3->iso2
+                if (iso.length === 3) {
+                    const iso2 = iso3ToIso2[iso.toUpperCase()];
+                    if (iso2) {
+                        let url2 = '/api/revolutions?countryIso=' + encodeURIComponent(iso2);
+                        let r2 = await fetch(url2);
+                        if (r2.ok) {
+                            let list2 = await r2.json();
+                            if (Array.isArray(list2) && list2.length > 0) return list2;
+                        }
+                    }
+                }
+            }
+            // 3) fallback: try by country name
+            if (name) {
+                const urlName = '/api/revolutions?country=' + encodeURIComponent(name);
+                let rn = await fetch(urlName);
+                if (rn.ok) {
+                    let listn = await rn.json();
+                    if (Array.isArray(listn) && listn.length > 0) return listn;
+                }
+            }
+            return [];
+        }
+
+        // add countries layer; clicking opens offcanvas instead of popup
         L.geoJSON(countries, {
             style: () => ({ color: '#3388ff', weight: 1, fillOpacity: 0.05 }),
             onEachFeature: (feature, layer) => {
@@ -84,20 +141,18 @@
                     const name = props.ADMIN || props.NAME || props.name || '';
                     const iso = pickIsoFromProps(props);
                     if (!iso) {
-                        L.popup().setLatLng(e.latlng).setContent(`<strong>${name}</strong><br/>No ISO available`).openOn(map);
+                        // show a minimal pane message
+                        const body = document.getElementById('revsPaneBody');
+                        body.innerHTML = `<div class="p-3"><strong>${name}</strong><div class="text-muted">No ISO available for lookup.</div></div>`;
+                        var off = new bootstrap.Offcanvas(document.getElementById('revsPane'));
+                        off.show();
                         return;
                     }
-                    // request exact ISO match from server
-                    const q = '/api/revolutions?countryIso=' + encodeURIComponent(iso);
-                    const r = await fetch(q);
-                    if (!r.ok) {
-                        console.error('API error', r.status);
-                        L.popup().setLatLng(e.latlng).setContent(`<strong>${name}</strong><br/>API error ${r.status}`).openOn(map);
-                        return;
-                    }
-                    const list = await r.json();
 
-                    // Defensive: ensure items have expected fields (name,startDate,endDate,description,wikidataId)
+                    // fetch items
+                    const list = await fetchRevolutionsForIsoOrName(iso, name);
+
+                    // normalize fields for display
                     const safeList = Array.isArray(list) ? list.map(i => ({
                         name: i.name ?? '(unnamed)',
                         startDate: i.startDate ?? null,
@@ -106,8 +161,11 @@
                         wikidataId: i.wikidataId ?? null
                     })) : [];
 
-                    const content = buildPopupContent(name || iso, iso, safeList);
-                    L.popup({ maxWidth: 460 }).setLatLng(e.latlng).setContent(content).openOn(map);
+                    const content = buildPaneContent(name || iso, iso, safeList);
+                    const body = document.getElementById('revsPaneBody');
+                    body.innerHTML = content;
+                    var off = new bootstrap.Offcanvas(document.getElementById('revsPane'));
+                    off.show();
                 });
             }
         }).addTo(map);
