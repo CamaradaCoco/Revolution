@@ -29,6 +29,12 @@
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
+    // helper: escape user-provided text for HTML
+    function escapeHtml(s) {
+        if (!s) return '';
+        return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+    }
+
     // load country GeoJSON
     const geojsonUrl = 'https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson';
     try {
@@ -60,7 +66,7 @@
 
         function buildPaneContent(countryName, iso, items) {
             let html = `<div style="max-width:100%;">`;
-            html += `<h4 style="margin:.25em 0;">${countryName}${iso ? ' (' + iso + ')' : ''}</h4>`;
+            html += `<h4 style="margin:.25em 0;">${escapeHtml(countryName)}${iso ? ' (' + escapeHtml(iso) + ')' : ''}</h4>`;
             if (!items || items.length === 0) {
                 html += '<div class="text-muted">No recorded revolutions since 1950.</div></div>';
                 return html;
@@ -74,16 +80,31 @@
             });
 
             html += '<ul class="list-unstyled" style="margin:0;">';
-            for (const it of items) {
+            for (let i = 0; i < items.length; i++) {
+                const it = items[i];
                 const start = it.startDate ? formatDateIso(it.startDate) : 'unknown';
                 const end = it.endDate ? formatDateIso(it.endDate) : '';
                 const period = end ? `${start} — ${end}` : `${start}`;
-                const wdLink = it.wikidataId ? ` <a href="https://www.wikidata.org/wiki/${it.wikidataId}" target="_blank" rel="noopener">Wikidata</a>` : '';
-                const desc = it.description ? `<div class="text-muted small" style="margin-top:.25rem;">${(it.description.length > 200) ? it.description.slice(0,200) + '…' : it.description}</div>` : '';
+                const wdLink = it.wikidataId ? ` <a href="https://www.wikidata.org/wiki/${encodeURIComponent(it.wikidataId)}" target="_blank" rel="noopener">Wikidata</a>` : '';
+                const fullDesc = it.description ?? '';
+                const shortDesc = fullDesc.length > 200 ? fullDesc.slice(0,200) + '…' : fullDesc;
+                const descId = `desc-${i}-${escapeHtml(iso || 'nok')}`;
+
+                let descHtml = '';
+                if (fullDesc) {
+                    // store full text encoded in data-full (encodedURIComponent) to avoid HTML injection
+                    descHtml = `<div id="${descId}" data-full="${encodeURIComponent(fullDesc)}" data-showing="0" class="text-muted small" style="margin-top:.25rem;">
+                                  <span class="desc-text">${escapeHtml(shortDesc)}</span>
+                                  ${fullDesc.length > 200 ? ` <a href="#" class="more-link" data-target="${descId}">more</a>` : ''}
+                                </div>`;
+                } else {
+                    descHtml = `<div class="text-muted small" style="margin-top:.25rem;">No description available.</div>`;
+                }
+
                 html += `<li style="margin-bottom:0.75rem;border-bottom:1px solid #eee;padding-bottom:.5rem;">
-                           <div><strong>${it.name}</strong>${wdLink}</div>
-                           <div class="small text-secondary">${period}</div>
-                           ${desc}
+                           <div><strong>${escapeHtml(it.name)}</strong>${wdLink}</div>
+                           <div class="small text-secondary">${escapeHtml(period)}</div>
+                           ${descHtml}
                          </li>`;
             }
             html += '</ul></div></div>';
@@ -131,6 +152,39 @@
             return [];
         }
 
+        // toggle description (delegated handler will call this)
+        function toggleDescription(targetId) {
+            const el = document.getElementById(targetId);
+            if (!el) return;
+            const full = decodeURIComponent(el.dataset.full || '');
+            const showing = el.dataset.showing === '1';
+            const descText = el.querySelector('.desc-text');
+            const link = el.querySelector('.more-link');
+            if (!descText || !link) return;
+            if (showing) {
+                // show short
+                const short = full.length > 200 ? full.slice(0,200) + '…' : full;
+                descText.textContent = short;
+                link.textContent = 'more';
+                el.dataset.showing = '0';
+            } else {
+                // show full
+                descText.textContent = full;
+                link.textContent = 'less';
+                el.dataset.showing = '1';
+            }
+        }
+
+        // event delegation for more/less links
+        document.getElementById('revsPaneBody').addEventListener('click', function(e) {
+            const a = e.target.closest && e.target.closest('.more-link');
+            if (a) {
+                e.preventDefault();
+                const target = a.getAttribute('data-target');
+                if (target) toggleDescription(target);
+            }
+        });
+
         // add countries layer; clicking opens offcanvas instead of popup
         L.geoJSON(countries, {
             style: () => ({ color: '#3388ff', weight: 1, fillOpacity: 0.05 }),
@@ -143,7 +197,7 @@
                     if (!iso) {
                         // show a minimal pane message
                         const body = document.getElementById('revsPaneBody');
-                        body.innerHTML = `<div class="p-3"><strong>${name}</strong><div class="text-muted">No ISO available for lookup.</div></div>`;
+                        body.innerHTML = `<div class="p-3"><strong>${escapeHtml(name)}</strong><div class="text-muted">No ISO available for lookup.</div></div>`;
                         var off = new bootstrap.Offcanvas(document.getElementById('revsPane'));
                         off.show();
                         return;

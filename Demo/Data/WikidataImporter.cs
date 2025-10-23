@@ -14,15 +14,16 @@ namespace Demo.Data
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
 
-        // Query: revolutions (wd:Q10931) since 1950 — now returns country ISO (P297)
+        // SPARQL: include english description (schema:description) as ?revolutionDescription
         private const string SparqlTemplate = @"#replaceLineBreaks
-SELECT DISTINCT ?revolution ?revolutionLabel ?country ?countryLabel ?countryIso ?startDate ?qid WHERE {
+SELECT DISTINCT ?revolution ?revolutionLabel ?revolutionDescription ?country ?countryLabel ?countryIso ?startDate ?qid WHERE {
   ?revolution wdt:P31/wdt:P279* wd:Q10931 .
   OPTIONAL { ?revolution wdt:P17 ?country .
              OPTIONAL { ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }
              OPTIONAL { ?country wdt:P297 ?countryIso. }
   }
   OPTIONAL { ?revolution wdt:P580 ?startDate. }
+  OPTIONAL { ?revolution schema:description ?revolutionDescription FILTER(LANG(?revolutionDescription) = 'en') }
   BIND(STRAFTER(STR(?revolution), 'http://www.wikidata.org/entity/') AS ?qid)
   FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1950)
   SERVICE wikibase:label { bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }
@@ -85,26 +86,34 @@ LIMIT {limit}";
                 var bindingArray = bindings.EnumerateArray().ToArray();
                 Console.WriteLine($"Wikidata import: fetched {bindingArray.Length} bindings (limit {limit}).");
 
-                // log a few sample bindings for inspection
+                // small helper to safely get binding string
+                static string get(JsonElement binding, string name)
+                {
+                    if (binding.TryGetProperty(name, out var el) && el.TryGetProperty("value", out var v))
+                        return v.GetString() ?? string.Empty;
+                    return string.Empty;
+                }
+
+                // log a few sample bindings for inspection (truncate long descriptions)
                 for (int i = 0; i < Math.Min(6, bindingArray.Length); i++)
                 {
                     var b = bindingArray[i];
-                    string sval(string n) => b.TryGetProperty(n, out var el) && el.TryGetProperty("value", out var v) ? v.GetString() ?? "" : "";
-                    Console.WriteLine($"sample[{i}]: qid={sval("qid")} label={sval("revolutionLabel")} start={sval("startDate")} countryLabel={sval("countryLabel")} countryIso={sval("countryIso")}");
+                    string q = get(b, "qid");
+                    string lbl = get(b, "revolutionLabel");
+                    string sd = get(b, "startDate");
+                    string c = get(b, "countryLabel");
+                    string ci = get(b, "countryIso");
+                    var desc = get(b, "revolutionDescription");
+                    var dshort = desc.Length > 80 ? desc.Substring(0, 77) + "..." : desc;
+                    Console.WriteLine($"sample[{i}]: qid={q} label={lbl} start={sd} country={c} iso={ci} desc={dshort}");
                 }
 
                 var imported = 0;
                 foreach (var b in bindingArray)
                 {
-                    static string get(JsonElement binding, string name)
-                    {
-                        if (binding.TryGetProperty(name, out var el) && el.TryGetProperty("value", out var v))
-                            return v.GetString() ?? string.Empty;
-                        return string.Empty;
-                    }
-
                     var qid = get(b, "qid");
                     var label = get(b, "revolutionLabel");
+                    var description = get(b, "revolutionDescription");
                     var startStr = get(b, "startDate");
                     var endStr = get(b, "end");
                     var countryLabel = get(b, "countryLabel");
@@ -139,7 +148,7 @@ LIMIT {limit}";
                         db.Revolutions.Add(entity);
                     }
 
-                    // store authoritative fields
+                    // store authoritative fields (store description from Wikidata)
                     entity.Name = string.IsNullOrWhiteSpace(label) ? qid : label;
                     entity.StartDate = startDate;
                     entity.EndDate = endDate;
@@ -147,7 +156,7 @@ LIMIT {limit}";
                     entity.CountryIso = string.IsNullOrWhiteSpace(countryIso) ? null : countryIso.ToUpperInvariant();
                     entity.Latitude = lat;
                     entity.Longitude = lon;
-                    entity.Description = string.Empty;
+                    entity.Description = string.IsNullOrWhiteSpace(description) ? string.Empty : description;
                     entity.Type = "Revolution/Uprising";
                     entity.Sources = "Wikidata";
 
