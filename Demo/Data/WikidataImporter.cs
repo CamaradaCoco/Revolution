@@ -14,18 +14,56 @@ namespace Demo.Data
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
 
-        // SPARQL: include english description (schema:description) as ?revolutionDescription
+        // Broader SPARQL: return events that are instances/subclasses of "revolution" OR whose English
+        // label/description contains common keywords (revolution, uprising, rebellion, insurgency, coup, protest).
+        // Accepts P580 (start time) or P585 (point in time) as start date via COALESCE.
+        // Returns English description (schema:description) where available and country ISO (P297).
+        // Limits and ordering preserved; replace {limit} when invoking.
         private const string SparqlTemplate = @"#replaceLineBreaks
-SELECT DISTINCT ?revolution ?revolutionLabel ?revolutionDescription ?country ?countryLabel ?countryIso ?startDate ?qid WHERE {
-  ?revolution wdt:P31/wdt:P279* wd:Q10931 .
-  OPTIONAL { ?revolution wdt:P17 ?country .
-             OPTIONAL { ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }
-             OPTIONAL { ?country wdt:P297 ?countryIso. }
+SELECT DISTINCT ?item ?itemLabel ?itemDescription ?country ?countryLabel ?countryIso ?startDate ?end ?qid WHERE {
+  # 1) Items that are instance-of (P31) or subclass-of (P279*) of revolution (Q10931)
+  { ?item wdt:P31/wdt:P279* wd:Q10931. }
+  UNION
+  # 2) Items whose English label contains common keywords
+  { ?item rdfs:label ?lab .
+    FILTER(LANG(?lab) = 'en' &&
+      (CONTAINS(LCASE(?lab),'revolution') ||
+       CONTAINS(LCASE(?lab),'uprising') ||
+       CONTAINS(LCASE(?lab),'rebellion') ||
+       CONTAINS(LCASE(?lab),'insurgency') ||
+       CONTAINS(LCASE(?lab),'coup') ||
+       CONTAINS(LCASE(?lab),'protest')))
   }
-  OPTIONAL { ?revolution wdt:P580 ?startDate. }
-  OPTIONAL { ?revolution schema:description ?revolutionDescription FILTER(LANG(?revolutionDescription) = 'en') }
-  BIND(STRAFTER(STR(?revolution), 'http://www.wikidata.org/entity/') AS ?qid)
+  UNION
+  # 3) Items whose English description contains the keywords
+  { ?item schema:description ?desc .
+    FILTER(LANG(?desc) = 'en' &&
+      (CONTAINS(LCASE(?desc),'revolution') ||
+       CONTAINS(LCASE(?desc),'uprising') ||
+       CONTAINS(LCASE(?desc),'rebellion') ||
+       CONTAINS(LCASE(?desc),'insurgency') ||
+       CONTAINS(LCASE(?desc),'coup') ||
+       CONTAINS(LCASE(?desc),'protest')))
+  }
+
+  # bind start date from either P580 or P585
+  OPTIONAL { ?item wdt:P580 ?s. }
+  OPTIONAL { ?item wdt:P585 ?p. }
+  BIND(COALESCE(?s, ?p) AS ?startDate)
   FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1950)
+
+  OPTIONAL { ?item wdt:P582 ?end. }
+
+  OPTIONAL {
+    ?item wdt:P17 ?country.
+    OPTIONAL { ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }
+    OPTIONAL { ?country wdt:P297 ?countryIso. }
+  }
+
+  OPTIONAL { ?item schema:description ?itemDescription FILTER(LANG(?itemDescription) = 'en') }
+
+  BIND(STRAFTER(STR(?item), 'http://www.wikidata.org/entity/') AS ?qid)
+
   SERVICE wikibase:label { bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }
 }
 ORDER BY ?countryLabel ?startDate
@@ -99,11 +137,11 @@ LIMIT {limit}";
                 {
                     var b = bindingArray[i];
                     string q = get(b, "qid");
-                    string lbl = get(b, "revolutionLabel");
+                    string lbl = get(b, "itemLabel");
                     string sd = get(b, "startDate");
                     string c = get(b, "countryLabel");
                     string ci = get(b, "countryIso");
-                    var desc = get(b, "revolutionDescription");
+                    var desc = get(b, "itemDescription");
                     var dshort = desc.Length > 80 ? desc.Substring(0, 77) + "..." : desc;
                     Console.WriteLine($"sample[{i}]: qid={q} label={lbl} start={sd} country={c} iso={ci} desc={dshort}");
                 }
@@ -112,8 +150,8 @@ LIMIT {limit}";
                 foreach (var b in bindingArray)
                 {
                     var qid = get(b, "qid");
-                    var label = get(b, "revolutionLabel");
-                    var description = get(b, "revolutionDescription");
+                    var label = get(b, "itemLabel");
+                    var description = get(b, "itemDescription");
                     var startStr = get(b, "startDate");
                     var endStr = get(b, "end");
                     var countryLabel = get(b, "countryLabel");
