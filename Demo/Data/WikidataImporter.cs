@@ -42,7 +42,7 @@ SELECT DISTINCT ?item ?itemLabel ?itemDescription ?country ?countryLabel ?countr
   OPTIONAL { ?item wdt:P580 ?s. }
   OPTIONAL { ?item wdt:P585 ?p. }
   BIND(COALESCE(?s, ?p) AS ?startDate)
-  FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1950)
+  FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1900)
 
   OPTIONAL { ?item wdt:P582 ?end. }
 
@@ -59,7 +59,7 @@ SELECT DISTINCT ?item ?itemLabel ?itemDescription ?country ?countryLabel ?countr
   SERVICE wikibase:label { bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }
 }
 ORDER BY ?countryLabel ?startDate
-LIMIT {limit}";
+LIMIT {500}";
 
         // Public entry used by Program.cs
         public static Task<int> FetchAndImportAsync(RevolutionContext db, HttpClient? client = null, CancellationToken ct = default)
