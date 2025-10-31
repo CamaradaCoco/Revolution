@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -14,17 +15,10 @@ namespace Demo.Data
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
 
-        // Broader SPARQL: return events that are instances/subclasses of "revolution" OR whose English
-        // label/description contains common keywords (revolution, uprising, rebellion, insurgency, coup, protest).
-        // Accepts P580 (start time) or P585 (point in time) as start date via COALESCE.
-        // Returns English description (schema:description) where available and country ISO (P297).
-        // Limits and ordering preserved; replace {limit} when invoking.
         private const string SparqlTemplate = @"#replaceLineBreaks
 SELECT DISTINCT ?item ?itemLabel ?itemDescription ?country ?countryLabel ?countryIso ?startDate ?end ?qid WHERE {
-  # 1) Items that are instance-of (P31) or subclass-of (P279*) of revolution (Q10931)
   { ?item wdt:P31/wdt:P279* wd:Q10931. }
   UNION
-  # 2) Items whose English label contains common keywords
   { ?item rdfs:label ?lab .
     FILTER(LANG(?lab) = 'en' &&
       (CONTAINS(LCASE(?lab),'revolution') ||
@@ -35,7 +29,6 @@ SELECT DISTINCT ?item ?itemLabel ?itemDescription ?country ?countryLabel ?countr
        CONTAINS(LCASE(?lab),'protest')))
   }
   UNION
-  # 3) Items whose English description contains the keywords
   { ?item schema:description ?desc .
     FILTER(LANG(?desc) = 'en' &&
       (CONTAINS(LCASE(?desc),'revolution') ||
@@ -46,7 +39,6 @@ SELECT DISTINCT ?item ?itemLabel ?itemDescription ?country ?countryLabel ?countr
        CONTAINS(LCASE(?desc),'protest')))
   }
 
-  # bind start date from either P580 or P585
   OPTIONAL { ?item wdt:P580 ?s. }
   OPTIONAL { ?item wdt:P585 ?p. }
   BIND(COALESCE(?s, ?p) AS ?startDate)
@@ -91,11 +83,13 @@ LIMIT {limit}";
 
             try
             {
-                try { client.DefaultRequestHeaders.UserAgent.ParseAdd("RevolutionsDataMap/0.1 (https://github.com/CamaradaCoco/Revolutions; elcosmith@hotmail.com)"); } catch { }
+                // Best-effort user agent; ignore if it fails
+                try { client.DefaultRequestHeaders.UserAgent.ParseAdd("RevolutionsDataMap/0.1"); } catch { }
+
                 client.DefaultRequestHeaders.Accept.Clear();
                 client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/sparql-results+json"));
 
-                var query = SparqlTemplate.Replace("#replaceLineBreaks", "").Replace("{limit}", limit.ToString());
+                var query = SparqlTemplate.Replace("#replaceLineBreaks", "").Replace("{limit}", limit.ToString(CultureInfo.InvariantCulture));
 
                 using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
                 {
@@ -124,69 +118,76 @@ LIMIT {limit}";
                 var bindingArray = bindings.EnumerateArray().ToArray();
                 Console.WriteLine($"Wikidata import: fetched {bindingArray.Length} bindings (limit {limit}).");
 
-                // small helper to safely get binding string
-                static string get(JsonElement binding, string name)
+                static string ValueOf(JsonElement el, string name)
                 {
-                    if (binding.TryGetProperty(name, out var el) && el.TryGetProperty("value", out var v))
-                        return v.GetString() ?? string.Empty;
-                    return string.Empty;
+                    return el.TryGetProperty(name, out var prop) && prop.TryGetProperty("value", out var v) ? v.GetString() ?? string.Empty : string.Empty;
                 }
 
-                // log a few sample bindings for inspection (truncate long descriptions)
-                for (int i = 0; i < Math.Min(6, bindingArray.Length); i++)
-                {
-                    var b = bindingArray[i];
-                    string q = get(b, "qid");
-                    string lbl = get(b, "itemLabel");
-                    string sd = get(b, "startDate");
-                    string c = get(b, "countryLabel");
-                    string ci = get(b, "countryIso");
-                    var desc = get(b, "itemDescription");
-                    var dshort = desc.Length > 80 ? desc.Substring(0, 77) + "..." : desc;
-                    Console.WriteLine($"sample[{i}]: qid={q} label={lbl} start={sd} country={c} iso={ci} desc={dshort}");
-                }
-
-                var imported = 0;
+                // Collect qids for a single DB query (avoid N queries)
+                var qids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var b in bindingArray)
                 {
-                    var qid = get(b, "qid");
-                    var label = get(b, "itemLabel");
-                    var description = get(b, "itemDescription");
-                    var startStr = get(b, "startDate");
-                    var endStr = get(b, "end");
-                    var countryLabel = get(b, "countryLabel");
-                    var countryIso = get(b, "countryIso");
-                    var latStr = get(b, "lat");
-                    var lonStr = get(b, "lon");
+                    var q = ValueOf(b, "qid");
+                    if (!string.IsNullOrWhiteSpace(q)) qids.Add(q);
+                }
 
-                    // require qid and start date for deterministic upsert
+                var existing = new Dictionary<string, Revolution>(StringComparer.OrdinalIgnoreCase);
+                if (qids.Count > 0)
+                {
+                    var list = await db.Revolutions
+                        .AsNoTracking()
+                        .Where(r => qids.Contains(r.WikidataId))
+                        .ToListAsync(ct);
+
+                    foreach (var r in list)
+                        if (!string.IsNullOrWhiteSpace(r.WikidataId))
+                            existing[r.WikidataId!] = r;
+                }
+
+                // We'll track newly created entities here so we can update them without another DB lookup
+                var toAdd = new List<Revolution>();
+                var imported = 0;
+
+                for (int i = 0; i < bindingArray.Length; i++)
+                {
+                    var b = bindingArray[i];
+
+                    var qid = ValueOf(b, "qid");
+                    var label = ValueOf(b, "itemLabel");
+                    var description = ValueOf(b, "itemDescription");
+                    var startStr = ValueOf(b, "startDate");
+                    var endStr = ValueOf(b, "end");
+                    var countryLabel = ValueOf(b, "countryLabel");
+                    var countryIso = ValueOf(b, "countryIso");
+                    var latStr = ValueOf(b, "lat");
+                    var lonStr = ValueOf(b, "lon");
+
                     if (string.IsNullOrWhiteSpace(qid))
                     {
                         Console.Error.WriteLine("Skipping binding with no qid (ambiguous): itemLabel=" + label);
                         continue;
                     }
-                    if (!DateTime.TryParse(startStr, out var startDate))
+
+                    if (!DateTime.TryParse(startStr, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var startDate))
                     {
                         Console.Error.WriteLine("Skipping binding with invalid startDate for qid=" + qid + " startStr=" + startStr);
                         continue;
                     }
 
                     DateTime? endDate = null;
-                    if (DateTime.TryParse(endStr, out var tmp)) endDate = tmp;
+                    if (DateTime.TryParse(endStr, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var tmpEnd))
+                        endDate = tmpEnd;
 
-                    double? lat = null, lon = null;
-                    if (double.TryParse(latStr, out var la)) lat = la;
-                    if (double.TryParse(lonStr, out var lo)) lon = lo;
+                    double? lat = double.TryParse(latStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var la) ? la : null;
+                    double? lon = double.TryParse(lonStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var lo) ? lo : null;
 
-                    // Upsert by WikidataId (qid)
-                    Revolution? entity = await db.Revolutions.FirstOrDefaultAsync(r => r.WikidataId == qid, ct);
-                    if (entity == null)
+                    if (!existing.TryGetValue(qid, out var entity))
                     {
                         entity = new Revolution { WikidataId = qid };
-                        db.Revolutions.Add(entity);
+                        toAdd.Add(entity);
+                        existing[qid] = entity; // keep in dictionary so duplicates in the results map to same instance
                     }
 
-                    // store authoritative fields (store description from Wikidata)
                     entity.Name = string.IsNullOrWhiteSpace(label) ? qid : label;
                     entity.StartDate = startDate;
                     entity.EndDate = endDate;
@@ -199,6 +200,12 @@ LIMIT {limit}";
                     entity.Sources = "Wikidata";
 
                     imported++;
+                }
+
+                // Attach new entities and save once
+                if (toAdd.Count > 0)
+                {
+                    db.Revolutions.AddRange(toAdd);
                 }
 
                 await db.SaveChangesAsync(ct);
