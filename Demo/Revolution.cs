@@ -13,6 +13,9 @@ namespace Demo.Models
         public string Country { get; set; } = string.Empty;
         public string? CountryIso { get; set; }
 
+        // Added: store the country's Wikidata QID (e.g. "Q142")
+        public string? CountryWikidataId { get; set; }
+
         public double? Latitude { get; set; }
         public double? Longitude { get; set; }
 
