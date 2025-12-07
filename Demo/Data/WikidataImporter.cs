@@ -15,7 +15,6 @@ namespace Demo.Data
     public static class WikidataImporter
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
-
         private const string SparqlTemplate = @"#replaceLineBreaks
 SELECT DISTINCT ?item ?itemLabel ?itemDescription ?place ?placeLabel ?country ?countryLabel ?countryIso ?countryQid ?startDate ?end ?qid ?coord WHERE {
   # candidate country sources only from place/admin → country
