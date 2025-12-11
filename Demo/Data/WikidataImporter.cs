@@ -16,27 +16,27 @@ namespace Demo.Data
     {
         private const string Endpoint = "https://query.wikidata.org/sparql";
         private const string SparqlTemplate = @"#replaceLineBreaks
-SELECT DISTINCT ?item ?itemLabel ?itemDescription ?place ?placeLabel ?country ?countryLabel ?countryIso ?countryQid ?startDate ?end ?qid ?coord WHERE {
+SELECT DISTINCT ?item ?itemLabel ?itemDescription ?place ?placeLabel ?country ?countryLabel ?countryIso ?countryQid ?startDate ?end ?qid ?coord WHERE {{
   # candidate country sources only from place/admin → country
-  OPTIONAL { ?item wdt:P276 ?place. ?place wdt:P17 ?countryFromPlace. }
-  OPTIONAL { ?item wdt:P131 ?placeAdmin. ?placeAdmin wdt:P17 ?countryFromAdmin. }
+  OPTIONAL {{ ?item wdt:P276 ?place. ?place wdt:P17 ?countryFromPlace. }}
+  OPTIONAL {{ ?item wdt:P131 ?placeAdmin. ?placeAdmin wdt:P17 ?countryFromAdmin. }}
 
   # choose place-derived country first, then admin-derived (NO fallback to item P17)
   BIND(COALESCE(?countryFromPlace, ?countryFromAdmin) AS ?country)
 
   # expose country QID and ISO explicitly
   BIND(STRAFTER(STR(?country), 'http://www.wikidata.org/entity/') AS ?countryQid)
-  OPTIONAL { ?country wdt:P297 ?countryIso. }
-  OPTIONAL { ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }
+  OPTIONAL {{ ?country wdt:P297 ?countryIso. }}
+  OPTIONAL {{ ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }}
 
   # require resolved country be present and that it came via a place/admin
   FILTER(BOUND(?country))
 
   # 1) Items that are instance-of (P31) or subclass-of (P279*) of revolution (Q10931)
-  { ?item wdt:P31/wdt:P279* wd:Q10931. }
+  {{ ?item wdt:P31/wdt:P279* wd:Q10931. }}
   UNION
   # 2) Items whose English description contains common keywords
-  { ?item schema:description ?desc .
+  {{ ?item schema:description ?desc .
     FILTER(LANG(?desc) = 'en' &&
       (CONTAINS(LCASE(?desc),'revolution') ||
        CONTAINS(LCASE(?desc),'uprising') ||
@@ -44,24 +44,24 @@ SELECT DISTINCT ?item ?itemLabel ?itemDescription ?place ?placeLabel ?country ?c
        CONTAINS(LCASE(?desc),'insurgency') ||
        CONTAINS(LCASE(?desc),'coup') ||
        CONTAINS(LCASE(?desc),'protest')))
-  }
+  }}
 
-  OPTIONAL { ?item wdt:P580 ?s. }
-  OPTIONAL { ?item wdt:P585 ?p. }
+  OPTIONAL {{ ?item wdt:P580 ?s. }}
+  OPTIONAL {{ ?item wdt:P585 ?p. }}
   BIND(COALESCE(?s, ?p) AS ?startDate)
   FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1900)
 
-  OPTIONAL { ?item wdt:P582 ?end. }
+  OPTIONAL {{ ?item wdt:P582 ?end. }}
 
-  OPTIONAL { ?item schema:description ?itemDescription FILTER(LANG(?itemDescription) = 'en') }
+  OPTIONAL {{ ?item schema:description ?itemDescription FILTER(LANG(?itemDescription) = 'en') }}
 
   # coordinates (point) if present
-  OPTIONAL { ?item wdt:P625 ?coord. }
+  OPTIONAL {{ ?item wdt:P625 ?coord. }}
 
   BIND(STRAFTER(STR(?item), 'http://www.wikidata.org/entity/') AS ?qid)
 
-  SERVICE wikibase:label { bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }
-}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }}
+}}
 ORDER BY ?countryLabel ?startDate ?qid
 LIMIT {limit}
 OFFSET {offset}";
@@ -257,6 +257,235 @@ OFFSET {offset}";
                 }
 
                 Console.WriteLine($"WikidataImporter: total imported {totalImported} items.");
+                return totalImported;
+            }
+            finally
+            {
+                if (createdClient) client.Dispose();
+            }
+        }
+
+        // New: import a specific set of QIDs (useful after resolving Wikipedia list)
+        // Uses SPARQL with a VALUES() clause to retrieve the same fields as the paged importer.
+        public static async Task<int> FetchAndImportByQidsAsync(RevolutionContext db, IEnumerable<string> qids, HttpClient? client = null, CancellationToken ct = default)
+        {
+            if (db is null) throw new ArgumentNullException(nameof(db));
+            if (qids == null) throw new ArgumentNullException(nameof(qids));
+
+            var qList = qids
+                .Where(q => !string.IsNullOrWhiteSpace(q))
+                .Select(q => q!.Trim().ToUpperInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (qList.Count == 0) return 0;
+
+            var createdClient = false;
+            if (client == null)
+            {
+                client = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate })
+                {
+                    Timeout = TimeSpan.FromSeconds(120)
+                };
+                createdClient = true;
+            }
+
+            try
+            {
+                try { client.DefaultRequestHeaders.UserAgent.ParseAdd("RevolutionsDataMap/0.1"); } catch { }
+                client.DefaultRequestHeaders.Accept.Clear();
+                client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/sparql-results+json"));
+
+                static string ValueOf(JsonElement el, string name)
+                {
+                    return el.TryGetProperty(name, out var prop) && prop.TryGetProperty("value", out var v) ? v.GetString() ?? string.Empty : string.Empty;
+                }
+
+                // Process in batches to keep query length sane
+                const int batchSize = 50;
+                var totalImported = 0;
+                var seenQids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                for (int i = 0; i < qList.Count; i += batchSize)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    var batch = qList.Skip(i).Take(batchSize).ToList();
+                    // build VALUES clause: wd:Q1 wd:Q2 ...
+                    var values = string.Join(" ", batch.Select(q => $"wd:{q}"));
+
+                    var query = $@"SELECT DISTINCT ?item ?itemLabel ?itemDescription ?place ?placeLabel ?country ?countryLabel ?countryIso ?countryQid ?startDate ?end ?qid ?coord WHERE {{
+  VALUES ?item {{ {values} }}
+
+  OPTIONAL {{ ?item wdt:P276 ?place. ?place wdt:P17 ?countryFromPlace. }}
+  OPTIONAL {{ ?item wdt:P131 ?placeAdmin. ?placeAdmin wdt:P17 ?countryFromAdmin. }}
+
+  BIND(COALESCE(?countryFromPlace, ?countryFromAdmin) AS ?country)
+
+  BIND(STRAFTER(STR(?country), 'http://www.wikidata.org/entity/') AS ?countryQid)
+  OPTIONAL {{ ?country wdt:P297 ?countryIso. }}
+  OPTIONAL {{ ?country rdfs:label ?countryLabel FILTER(LANG(?countryLabel) = 'en') }}
+
+  FILTER(BOUND(?country))
+
+  {{ ?item wdt:P31/wdt:P279* wd:Q10931. }}
+  UNION
+  {{ ?item schema:description ?desc .
+    FILTER(LANG(?desc) = 'en' &&
+      (CONTAINS(LCASE(?desc),'revolution') ||
+       CONTAINS(LCASE(?desc),'uprising') ||
+       CONTAINS(LCASE(?desc),'rebellion') ||
+       CONTAINS(LCASE(?desc),'insurgency') ||
+       CONTAINS(LCASE(?desc),'coup') ||
+       CONTAINS(LCASE(?desc),'protest')))
+  }}
+
+  OPTIONAL {{ ?item wdt:P580 ?s. }}
+  OPTIONAL {{ ?item wdt:P585 ?p. }}
+  BIND(COALESCE(?s, ?p) AS ?startDate)
+  FILTER(BOUND(?startDate) && YEAR(?startDate) >= 1900)
+
+  OPTIONAL {{ ?item wdt:P582 ?end. }}
+  OPTIONAL {{ ?item schema:description ?itemDescription FILTER(LANG(?itemDescription) = 'en') }}
+  OPTIONAL {{ ?item wdt:P625 ?coord. }}
+  BIND(STRAFTER(STR(?item), 'http://www.wikidata.org/entity/') AS ?qid)
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language ""[AUTO_LANGUAGE],en"". }}
+}}";
+
+                    using var req = new HttpRequestMessage(HttpMethod.Post, Endpoint)
+                    {
+                        Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("query", query) })
+                    };
+                    req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/sparql-results+json"));
+
+                    using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        var body = await resp.Content.ReadAsStringAsync(ct);
+                        Console.Error.WriteLine($"Wikidata QIDs import failed (status {(int)resp.StatusCode}): {resp.ReasonPhrase}");
+                        Console.Error.WriteLine("Response body (truncated): " + (body?.Length > 2000 ? body.Substring(0, 2000) + "..." : body));
+                        continue;
+                    }
+
+                    using var stream = await resp.Content.ReadAsStreamAsync(ct);
+                    using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+                    if (!doc.RootElement.TryGetProperty("results", out var results) || !results.TryGetProperty("bindings", out var bindings))
+                    {
+                        Console.Error.WriteLine("Wikidata QIDs import: unexpected response structure.");
+                        continue;
+                    }
+
+                    var bindingArray = bindings.EnumerateArray().ToArray();
+                    if (bindingArray.Length == 0) continue;
+
+                    // Collect qids present in this page
+                    var pageQids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var b in bindingArray)
+                    {
+                        var q = ValueOf(b, "qid");
+                        if (!string.IsNullOrWhiteSpace(q) && !seenQids.Contains(q))
+                            pageQids.Add(q);
+                    }
+                    if (pageQids.Count == 0) continue;
+
+                    // Load existing revolutions with these qids
+                    var existingList = await db.Revolutions
+                        .Where(r => pageQids.Contains(r.WikidataId))
+                        .ToListAsync(ct);
+
+                    var existing = existingList
+                        .Where(r => !string.IsNullOrWhiteSpace(r.WikidataId))
+                        .ToDictionary(r => r.WikidataId!, StringComparer.OrdinalIgnoreCase);
+
+                    var toAdd = new List<Revolution>();
+                    var importedThisBatch = 0;
+
+                    foreach (var b in bindingArray)
+                    {
+                        var qid = ValueOf(b, "qid");
+                        if (string.IsNullOrWhiteSpace(qid) || seenQids.Contains(qid))
+                            continue;
+
+                        var label = ValueOf(b, "itemLabel");
+                        var description = ValueOf(b, "itemDescription");
+                        var startStr = ValueOf(b, "startDate");
+                        var endStr = ValueOf(b, "end");
+                        var countryQid = ValueOf(b, "countryQid");
+                        var countryLabel = ValueOf(b, "countryLabel");
+                        var countryIso = ValueOf(b, "countryIso");
+                        var coordStr = ValueOf(b, "coord");
+
+                        if (!DateTime.TryParse(startStr, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var startDate))
+                        {
+                            Console.Error.WriteLine("Skipping qid=" + qid + " due to invalid startDate: " + startStr);
+                            seenQids.Add(qid);
+                            continue;
+                        }
+
+                        DateTime? endDate = null;
+                        if (DateTime.TryParse(endStr, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var tmpEnd))
+                            endDate = tmpEnd;
+
+                        double? lat = null;
+                        double? lon = null;
+                        if (!string.IsNullOrWhiteSpace(coordStr) && coordStr.StartsWith("Point(", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var inner = coordStr.Substring("Point(".Length).TrimEnd(')');
+                            var parts = inner.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                            if (parts.Length == 2
+                                && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedLat)
+                                && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedLon))
+                            {
+                                lat = parsedLat;
+                                lon = parsedLon;
+                            }
+                        }
+
+                        // Skip items that have neither a resolved country QID nor coordinates
+                        if (string.IsNullOrWhiteSpace(countryQid) && lat == null && lon == null)
+                        {
+                            Console.Error.WriteLine($"Skipping qid={qid}: no country or coordinates.");
+                            seenQids.Add(qid);
+                            continue;
+                        }
+
+                        if (!existing.TryGetValue(qid, out var entity))
+                        {
+                            entity = new Revolution { WikidataId = qid };
+                            toAdd.Add(entity);
+                            existing[qid] = entity;
+                        }
+
+                        entity.Name = string.IsNullOrWhiteSpace(label) ? qid : label;
+                        entity.StartDate = startDate;
+                        entity.EndDate = endDate;
+                        entity.Country = countryLabel ?? string.Empty;
+                        entity.CountryIso = string.IsNullOrWhiteSpace(countryIso) ? null : countryIso.ToUpperInvariant();
+                        entity.CountryWikidataId = string.IsNullOrWhiteSpace(countryQid) ? null : countryQid;
+                        entity.Latitude = lat;
+                        entity.Longitude = lon;
+                        entity.Description = string.IsNullOrWhiteSpace(description) ? string.Empty : description;
+                        entity.Type = "Revolution/Uprising";
+                        entity.Sources = "Wikidata (QID import)";
+
+                        importedThisBatch++;
+                        seenQids.Add(qid);
+                    }
+
+                    if (toAdd.Count > 0)
+                    {
+                        db.Revolutions.AddRange(toAdd);
+                    }
+
+                    await db.SaveChangesAsync(ct);
+                    totalImported += importedThisBatch;
+
+                    // small pause to be polite to WDQS
+                    await Task.Delay(200, ct);
+                }
+
+                Console.WriteLine($"WikidataImporter: total imported by QIDs {totalImported} items.");
                 return totalImported;
             }
             finally

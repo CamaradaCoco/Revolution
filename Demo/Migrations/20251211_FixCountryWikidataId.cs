@@ -1,14 +1,15 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+using System;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace Demo.Migrations
 {
-    public partial class AddCountryWikidataId : Migration
+    public partial class FixCountryWikidataId : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // Idempotent: add column only if it does not already exist.
+            // Add CountryWikidataId only if it does not already exist (safe to run against DBs with different states)
             migrationBuilder.Sql(@"
 IF NOT EXISTS (
     SELECT 1 FROM sys.columns
@@ -22,7 +23,7 @@ END
 
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            // Remove the column only if it exists.
+            // Remove the column only if it exists (reversible)
             migrationBuilder.Sql(@"
 IF EXISTS (
     SELECT 1 FROM sys.columns

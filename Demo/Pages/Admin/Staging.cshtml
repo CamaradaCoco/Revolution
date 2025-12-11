@@ -1,0 +1,61 @@
+﻿@page
+@model Demo.Pages.Admin.StagingModel
+@{
+    ViewData["Title"] = "Staged Revolutions";
+}
+<div class="container">
+    <h2>Staged Revolutions (Pending)</h2>
+
+    <form method="post" asp-page-handler="ImportWikipedia" class="mb-3">
+        <button type="submit" class="btn btn-primary">Import candidates from Wikipedia 1900s (QIDs)</button>
+    </form>
+
+    @if (TempData["ImportError"] != null)
+    {
+        <div class="alert alert-danger">@TempData["ImportError"]</div>
+    }
+    @if (TempData["ImportSuccess"] != null)
+    {
+        <div class="alert alert-success">@TempData["ImportSuccess"]</div>
+    }
+
+    <table class="table table-sm table-striped">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Start</th>
+                <th>Country</th>
+                <th>Coords</th>
+                <th>Wikidata</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var s in Model.Pending)
+        {
+            <tr>
+                <td>@s.Name</td>
+                <td>@s.StartDate.ToString("yyyy-MM-dd")</td>
+                <td>@s.Country (@s.CountryIso)</td>
+                <td>@(s.Latitude.HasValue && s.Longitude.HasValue ? $"{s.Latitude:F4}, {s.Longitude:F4}" : "-")</td>
+                <td>
+                    @if (!string.IsNullOrEmpty(s.WikidataId))
+                    {
+                        <a target="_blank" rel="noopener" href="https://www.wikidata.org/wiki/@s.WikidataId">@s.WikidataId</a>
+                    }
+                </td>
+                <td style="white-space:nowrap;">
+                    <form method="post" asp-page-handler="Approve" style="display:inline">
+                        <input type="hidden" name="id" value="@s.Id" />
+                        <button class="btn btn-sm btn-success" type="submit">Approve</button>
+                    </form>
+                    <form method="post" asp-page-handler="Reject" style="display:inline;margin-left:.5rem">
+                        <input type="hidden" name="id" value="@s.Id" />
+                        <button class="btn btn-sm btn-danger" type="submit">Reject</button>
+                    </form>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+</div>
