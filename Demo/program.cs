@@ -22,6 +22,9 @@ builder.Services.AddCors(options =>
 builder.Services.AddDbContext<RevolutionContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
+builder.Services.AddSingleton<Demo.Services.IBackgroundTaskQueue, Demo.Services.BackgroundTaskQueue>();
+builder.Services.AddHostedService<Demo.Services.QueuedHostedService>();
+
 var app = builder.Build();
 
 // Run migrations and import (dev) - keep safe default import if desired

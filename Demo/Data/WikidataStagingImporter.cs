@@ -97,8 +97,10 @@ namespace Demo.Data
                     using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
                     if (!resp.IsSuccessStatusCode)
                     {
-                        // stop on server error (avoid hammering)
-                        break;
+                        var body = await resp.Content.ReadAsStringAsync(ct);
+                        // include truncated body to avoid huge logs
+                        var truncated = body?.Length > 2000 ? body.Substring(0, 2000) + "..." : body;
+                        throw new HttpRequestException($"Wikidata SPARQL request failed: {(int)resp.StatusCode} {resp.ReasonPhrase}. Response: {truncated}");
                     }
 
                     using var stream = await resp.Content.ReadAsStreamAsync(ct);

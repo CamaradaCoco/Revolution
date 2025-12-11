@@ -10,6 +10,14 @@
         <button type="submit" class="btn btn-primary">Import candidates from Wikipedia 1900s (QIDs)</button>
     </form>
 
+    <form method="post" asp-page-handler="StageAll" class="mb-3">
+        <button type="submit" class="btn btn-warning">Stage all Wikidata results (SPARQL)</button>
+    </form>
+
+    <form method="post" asp-page-handler="EnqueueImportAll" class="mb-3">
+        <button type="submit" class="btn btn-info">Enqueue bulk Wikidata staging (background)</button>
+    </form>
+
     @if (TempData["ImportError"] != null)
     {
         <div class="alert alert-danger">@TempData["ImportError"]</div>
